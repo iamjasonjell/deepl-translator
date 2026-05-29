@@ -249,6 +249,7 @@ const LANGUAGES = [
 
 let selectedFile = null
 let currentJobId = null
+let currentFilename = 'translations'
 let pollTimer = null
 
 // ── Build language grid ───────────────────────────────────────────────────────
@@ -356,6 +357,7 @@ async function poll() {
     const res  = await fetch(`/api/status/${currentJobId}`)
     const data = await res.json()
     if (!res.ok) throw new Error(data.error)
+    if (data.filename) currentFilename = data.filename
     updateUI(data)
     if (!data.allDone) {
       pollTimer = setTimeout(poll, 2000)
@@ -413,7 +415,7 @@ async function downloadZip() {
     const url  = URL.createObjectURL(blob)
     const a    = document.createElement('a')
     a.href     = url
-    a.download = `translations.zip`
+    a.download = `${currentFilename}_translations.zip`
     a.click()
     URL.revokeObjectURL(url)
     btn.textContent = '✓ Downloaded'
@@ -428,6 +430,7 @@ async function downloadZip() {
 document.getElementById('resetLink').addEventListener('click', () => {
   clearTimeout(pollTimer)
   currentJobId = null
+  currentFilename = 'translations'
   selectedFile = null
   fileInput.value = ''
   uploadText.style.display = 'none'

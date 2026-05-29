@@ -5,6 +5,17 @@ const archiver = require('archiver')
 const JSZip = require('jszip')
 const path = require('path')
 const crypto = require('crypto')
+const fs = require('fs')
+
+// ── Log buffer — keeps last 200 entries, also writes to debug.log ─────────────
+const logBuffer = []
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ${args.join(' ')}`
+  console.log(line)
+  logBuffer.push(line)
+  if (logBuffer.length > 200) logBuffer.shift()
+  try { fs.appendFileSync(path.join(__dirname, 'debug.log'), line + '\n') } catch {}
+}
 
 const app = express()
 const upload = multer({
@@ -78,7 +89,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
     )
     fd.append('target_lang', deeplLang)
 
-    console.log(`${tag} uploading to ${DEEPL_BASE} target_lang=${deeplLang}`)
+    log(`${tag} uploading to ${DEEPL_BASE} target_lang=${deeplLang}`)
     const res = await fetch(`${DEEPL_BASE}/v2/document`, {
       method: 'POST',
       headers: { Authorization: `DeepL-Auth-Key ${apiKey}` },
@@ -91,7 +102,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
       throw new Error(`Upload failed (${res.status}): ${text}`)
     }
     const data = await res.json()
-    console.log(`${tag} upload ok document_id=${data.document_id}`)
+    log(`${tag} upload ok document_id=${data.document_id}`)
     return data
   })
 
@@ -112,7 +123,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
     if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`)
 
     const statusData = await statusRes.json()
-    console.log(`${tag} poll ${poll + 1}: ${JSON.stringify(statusData)}`)
+    log(`${tag} poll ${poll + 1}: ${JSON.stringify(statusData)}`)
     const { status, error_message } = statusData
     if (status === 'done') break
     if (status === 'error') throw new Error(error_message || 'DeepL returned error status')
@@ -120,7 +131,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
   }
 
   // Step 3 — download
-  console.log(`${tag} downloading result`)
+  log(`${tag} downloading result`)
   const dlRes = await fetch(`${DEEPL_BASE}/v2/document/${document_id}/result`, {
     method: 'POST',
     headers: {
@@ -131,7 +142,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
     signal: AbortSignal.timeout(60000),
   })
 
-  console.log(`${tag} download response ${dlRes.status} content-type=${dlRes.headers.get('content-type')}`)
+  log(`${tag} download response ${dlRes.status} content-type=${dlRes.headers.get('content-type')}`)
   if (!dlRes.ok) {
     const body = await dlRes.text().catch(() => '')
     throw new Error(`Download failed (${dlRes.status}): ${body}`)
@@ -139,22 +150,23 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
   return Buffer.from(await dlRes.arrayBuffer())
 }
 
-// ── DOCX text extraction (adapted from QA project document-extractor pattern) ─
+// ── DOCX text extraction — pulls only <w:t> text nodes to avoid XML artifacts ─
 async function extractDocxText(buffer) {
   try {
     const zip = await JSZip.loadAsync(buffer)
     const xmlFile = zip.files['word/document.xml']
     if (!xmlFile) return ''
     const xml = await xmlFile.async('string')
-    return xml
-      .replace(/<w:p\b[^>]*/g, '\n')   // paragraph → newline
-      .replace(/<[^>]+>/g, '')           // strip all tags
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    const paragraphs = []
+    for (const para of xml.split(/<w:p[ >]/)) {
+      const texts = [...para.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1])
+      const line = texts.join('').trim()
+      if (line) paragraphs.push(line)
+    }
+    return paragraphs.join('\n')
+      .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'")
       .trim()
-  } catch {
-    return ''
-  }
+  } catch { return '' }
 }
 
 // ── Gemini review (adapted from QA project runHolisticPageQA prompt) ──────────
@@ -198,25 +210,30 @@ ${enText.slice(0, 6000)}
 ${langName.toUpperCase()} TRANSLATION:
 ${translatedText.slice(0, 6000)}
 
-Identify the most significant translation issues. Return at most 10 issues.
+Identify the most significant translation issues. Return at most 5 issues. Only include issues where you are confident the suggestion is a genuine improvement — if uncertain, omit it.
+
+Focus only on translation quality — word choice, terminology accuracy, and phrasing naturalness. Do not flag brand names or compliance language.
 
 Rules:
-- "Olympus" used as a current brand name should be "Evident" (historical references are fine)
 - Product model numbers must stay in English: FV4000, FV5000, BX53, IX83, CX43, etc.
-- Scientific/microscopy terms should use standard ${langName} equivalents used in peer-reviewed literature
-- Flag unnatural phrasing that reads as machine-translated to a native ${langName} scientific professional
-
-For each issue provide a concrete fix — not a description of the problem, the actual corrected ${langName} text.
+- Scientific/microscopy terms should use standard ${langName} equivalents from peer-reviewed literature.
+- Flag unnatural phrasing ONLY if you have a meaningfully better alternative.
+- Do NOT flag English words or phrases that appear in both source and translation — product names, model numbers, and technical terms intentionally kept in English are correct.
+- IMPORTANT: Do not include an issue if the suggestion is identical to the flagged text. Only include issues where you can provide a genuine improvement.
 
 Return ONLY valid JSON (no markdown):
-{"issues":[{"severity":"critical|high|medium|low","type":"terminology|untranslated|brand_misuse|unnatural_phrasing|missing_content","flagged_text":"...","suggestion":"..."}]}`
+{"issues":[{"severity":"critical|high|medium|low","type":"terminology|untranslated|unnatural_phrasing|missing_content","flagged_text":"...","suggestion":"..."}]}`
 
   try {
     const raw = await callGemini(prompt)
     if (!raw) return []
     const cleaned = raw.replace(/^```json?\n?/, '').replace(/\n?```$/, '').trim()
     const parsed = JSON.parse(cleaned)
-    return parsed.issues ?? []
+    const norm = s => (s || '').trim().replace(/\s+/g, ' ').toLowerCase()
+    return (parsed.issues ?? []).filter(i =>
+      i.flagged_text && i.suggestion &&
+      norm(i.flagged_text) !== norm(i.suggestion)
+    )
   } catch {
     return []
   }
@@ -229,7 +246,7 @@ async function generateReviewReport(job, enText) {
     ``,
     `**Document:** ${job.originalFilename}`,
     `**Generated:** ${new Date().toUTCString()}`,
-    `**Languages reviewed:** ${job.languages.filter(l => l.status === 'done').map(l => l.name).join(', ')}`,
+    `**Languages reviewed:** ${job.languages.filter(l => l.buffer).map(l => l.name).join(', ')}`,
     ``,
     `---`,
     ``,
@@ -239,7 +256,7 @@ async function generateReviewReport(job, enText) {
     lines.push(`## ${lang.name} (${lang.locale})`)
     lines.push('')
 
-    if (lang.status !== 'done' || !lang.buffer) {
+    if (!lang.buffer) {
       lines.push(`_Translation failed — no review available._`)
       lines.push('', '---', '')
       continue
@@ -260,12 +277,18 @@ async function generateReviewReport(job, enText) {
       const order = { critical: 0, high: 1, medium: 2, low: 3 }
       issues.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4))
 
+      const TYPE_LABEL = { terminology: 'Terminology', untranslated: 'Untranslated', unnatural_phrasing: 'Unnatural Phrasing', missing_content: 'Missing Content' }
+      const SEV_LABEL  = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' }
+
       issues.forEach((issue, i) => {
-        const badge = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' }[issue.severity] ?? '⚪'
-        lines.push(`### ${badge} Issue ${i + 1} — ${issue.type ?? 'unspecified'} (${issue.severity})`)
+        const badge    = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' }[issue.severity?.toLowerCase()] ?? '⚪'
+        const typeStr  = TYPE_LABEL[issue.type?.toLowerCase()] ?? issue.type ?? 'Unspecified'
+        const sevStr   = SEV_LABEL[issue.severity?.toLowerCase()] ?? issue.severity ?? ''
+        lines.push(`### ${badge} Issue ${i + 1} — ${typeStr} (${sevStr})`)
         lines.push('')
         if (issue.flagged_text) lines.push(`**Flagged:** ${issue.flagged_text}`)
         if (issue.suggestion)   lines.push(`**Suggestion:** ${issue.suggestion}`)
+        lines.push('')
         lines.push('')
       })
     }
@@ -293,7 +316,7 @@ async function processJob(jobId) {
     } catch (err) {
       lang.status = 'error'
       lang.error = err.message
-      console.error(`[${jobId}] ${lang.locale} translation failed:`, err.message)
+      log(`[${jobId}] ${lang.locale} FAILED: ${err.message}`)
     }
   }
 
@@ -347,7 +370,7 @@ app.post('/api/translate', upload.single('file'), (req, res) => {
   if (invalid.length) return res.status(400).json({ error: `Unknown locales: ${invalid.join(', ')}` })
 
   const jobId = crypto.randomUUID()
-  const baseName = req.file.originalname.replace(/\.docx$/i, '')
+  const baseName = decodeURIComponent(req.file.originalname).replace(/\.docx$/i, '').trim()
 
   jobs.set(jobId, {
     id: jobId,
@@ -400,7 +423,8 @@ app.get('/api/download/:jobId', (req, res) => {
   if (!hasResults) return res.status(400).json({ error: 'No successful translations to download' })
 
   res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', `attachment; filename="${job.filename}_translations.zip"`)
+  const zipName = `${job.filename}_translations.zip`
+  res.setHeader('Content-Disposition', `attachment; filename="${zipName}"; filename*=UTF-8''${encodeURIComponent(zipName)}`)
 
   const archive = archiver('zip', { zlib: { level: 6 } })
   archive.on('error', err => { console.error('Archive error:', err); res.end() })
@@ -423,6 +447,12 @@ app.get('/api/download/:jobId', (req, res) => {
   }
 
   archive.finalize()
+})
+
+// GET /api/logs — view recent log entries in browser
+app.get('/api/logs', (_req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+  res.send(logBuffer.join('\n'))
 })
 
 // ── Start ─────────────────────────────────────────────────────────────────────
