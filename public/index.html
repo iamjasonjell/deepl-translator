@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepL DOCX Translator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #09090b;
+    --surface: #18181b;
+    --border: #27272a;
+    --text: #fafafa;
+    --muted: #71717a;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 48px 16px;
+  }
+
+  .container { width: 100%; max-width: 640px; }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 13px; }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 40px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+    margin-bottom: 24px;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(59,130,246,0.05);
+  }
+  .upload-zone input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .upload-icon { font-size: 32px; margin-bottom: 12px; }
+  .upload-label { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .upload-label span { color: var(--accent); }
+  .file-selected { color: var(--text); font-weight: 500; font-size: 15px; }
+
+  /* Languages */
+  .section-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .lang-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .lang-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+    user-select: none;
+  }
+  .lang-check:hover { border-color: var(--accent); }
+  .lang-check input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+  .lang-name { font-size: 13px; }
+  .lang-code { font-size: 11px; color: var(--muted); margin-left: auto; font-family: monospace; }
+
+  /* Translate button */
+  .btn {
+    width: 100%;
+    padding: 12px;
+    border-radius: 8px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+    margin-bottom: 32px;
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-success:hover:not(:disabled) { opacity: 0.85; }
+
+  /* Progress section */
+  .progress-section { display: none; }
+  .progress-section.visible { display: block; }
+
+  .progress-bar-wrap {
+    background: var(--surface);
+    border-radius: 99px;
+    height: 6px;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 99px;
+    transition: width 0.4s ease;
+    width: 0%;
+  }
+
+  .lang-status-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px; }
+  .lang-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+  .status-dot.waiting     { background: var(--muted); }
+  .status-dot.translating { background: var(--accent); animation: pulse 1s infinite; }
+  .status-dot.translated  { background: var(--accent); }
+  .status-dot.reviewing   { background: var(--yellow); animation: pulse 1s infinite; }
+  .status-dot.done        { background: var(--green); }
+  .status-dot.error       { background: var(--red); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .lang-row-name { font-size: 13px; font-weight: 500; }
+  .lang-row-code { font-size: 11px; color: var(--muted); font-family: monospace; }
+  .lang-row-status {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .lang-row-status.done    { color: var(--green); }
+  .lang-row-status.error   { color: var(--red); }
+  .lang-row-status.translating { color: var(--accent); }
+
+  .error-box {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: #fca5a5;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .error-box.visible { display: block; }
+
+  .reset-link {
+    display: block;
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    margin-top: 8px;
+    text-decoration: underline;
+  }
+  .reset-link:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>DeepL DOCX Translator</h1>
+  <p class="subtitle">Upload an English DOCX — receive translations in a ZIP</p>
+
+  <!-- Upload -->
+  <div class="upload-zone" id="uploadZone">
+    <input type="file" id="fileInput" accept=".docx">
+    <div class="upload-icon">📄</div>
+    <div id="uploadText" class="file-selected" style="display:none"></div>
+    <div id="uploadPrompt">
+      <strong>Drop your DOCX here</strong>
+      <div class="upload-label">or <span>click to browse</span></div>
+    </div>
+  </div>
+
+  <!-- Languages -->
+  <div class="section-label">Target Languages</div>
+  <div class="lang-grid" id="langGrid"></div>
+
+  <!-- Translate button -->
+  <button class="btn btn-primary" id="translateBtn" disabled>Translate</button>
+
+  <!-- Error -->
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- Progress -->
+  <div class="progress-section" id="progressSection">
+    <div class="section-label">Translation Progress</div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progressFill"></div>
+    </div>
+    <div class="lang-status-list" id="statusList"></div>
+    <button class="btn btn-success" id="downloadBtn" style="display:none" disabled>
+      ⬇ Download ZIP
+    </button>
+    <a class="reset-link" id="resetLink" style="display:none">Translate another file</a>
+  </div>
+</div>
+
+<script>
+const LANGUAGES = [
+  { locale: 'de-de', name: 'German' },
+  { locale: 'fr-fr', name: 'French' },
+  { locale: 'it-it', name: 'Italian' },
+  { locale: 'es-xn', name: 'Spanish' },
+  { locale: 'ja-jp', name: 'Japanese' },
+  { locale: 'ko-kr', name: 'Korean' },
+  { locale: 'zh-cn', name: 'Chinese (Simplified)' },
+]
+
+let selectedFile = null
+let currentJobId = null
+let pollTimer = null
+
+// ── Build language grid ───────────────────────────────────────────────────────
+const grid = document.getElementById('langGrid')
+LANGUAGES.forEach(({ locale, name }) => {
+  const label = document.createElement('label')
+  label.className = 'lang-check'
+  label.innerHTML = `
+    <input type="checkbox" value="${locale}" checked>
+    <span class="lang-name">${name}</span>
+    <span class="lang-code">${locale}</span>
+  `
+  grid.appendChild(label)
+})
+
+function selectedLocales() {
+  return [...document.querySelectorAll('#langGrid input:checked')].map(i => i.value)
+}
+
+// ── Upload zone ───────────────────────────────────────────────────────────────
+const uploadZone = document.getElementById('uploadZone')
+const fileInput  = document.getElementById('fileInput')
+const uploadText = document.getElementById('uploadText')
+const uploadPrompt = document.getElementById('uploadPrompt')
+const translateBtn = document.getElementById('translateBtn')
+
+function setFile(file) {
+  if (!file || !file.name.toLowerCase().endsWith('.docx')) {
+    showError('Please select a .docx file')
+    return
+  }
+  selectedFile = file
+  uploadText.textContent = file.name
+  uploadText.style.display = ''
+  uploadPrompt.style.display = 'none'
+  translateBtn.disabled = false
+}
+
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]) })
+
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over') })
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'))
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault()
+  uploadZone.classList.remove('drag-over')
+  const file = e.dataTransfer.files[0]
+  if (file) setFile(file)
+})
+
+// ── Translate ─────────────────────────────────────────────────────────────────
+translateBtn.addEventListener('click', async () => {
+  hideError()
+  const locales = selectedLocales()
+  if (!selectedFile) return showError('Please select a DOCX file')
+  if (!locales.length)  return showError('Select at least one language')
+
+  translateBtn.disabled = true
+  translateBtn.textContent = 'Uploading…'
+
+  const fd = new FormData()
+  fd.append('file', selectedFile)
+  fd.append('languages', JSON.stringify(locales))
+
+  try {
+    const res = await fetch('/api/translate', { method: 'POST', body: fd })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Upload failed')
+    currentJobId = data.jobId
+    startPolling(locales)
+  } catch (err) {
+    showError(err.message)
+    translateBtn.disabled = false
+    translateBtn.textContent = 'Translate'
+  }
+})
+
+// ── Polling (adapted from QA tool's CrawlRunner poll pattern) ─────────────────
+function startPolling(locales) {
+  document.getElementById('progressSection').classList.add('visible')
+  buildStatusList(locales)
+  poll()
+}
+
+function buildStatusList(locales) {
+  const list = document.getElementById('statusList')
+  list.innerHTML = ''
+  locales.forEach(locale => {
+    const lang = LANGUAGES.find(l => l.locale === locale)
+    const row = document.createElement('div')
+    row.className = 'lang-row'
+    row.id = `row-${locale}`
+    row.innerHTML = `
+      <div class="status-dot waiting" id="dot-${locale}"></div>
+      <span class="lang-row-name">${lang?.name || locale}</span>
+      <span class="lang-row-code">${locale}</span>
+      <span class="lang-row-status" id="stat-${locale}">Waiting</span>
+    `
+    list.appendChild(row)
+  })
+}
+
+async function poll() {
+  if (!currentJobId) return
+  try {
+    const res  = await fetch(`/api/status/${currentJobId}`)
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error)
+    updateUI(data)
+    if (!data.allDone) {
+      pollTimer = setTimeout(poll, 2000)
+    }
+  } catch (err) {
+    showError(`Polling error: ${err.message}`)
+  }
+}
+
+function updateUI({ languages, allDone, hasReview }) {
+  let done = 0
+  languages.forEach(({ locale, status, error }) => {
+    const dot  = document.getElementById(`dot-${locale}`)
+    const stat = document.getElementById(`stat-${locale}`)
+    if (!dot || !stat) return
+
+    dot.className  = `status-dot ${status}`
+    stat.className = `lang-row-status ${status}`
+
+    const labels = { waiting: 'Waiting', translating: 'Translating…', translated: 'Reviewing…', reviewing: 'Reviewing…', done: 'Done', error: 'Error' }
+    stat.textContent = status === 'error' ? (error || 'Error') : (labels[status] || status)
+
+    if (status === 'done' || status === 'error') done++
+  })
+
+  const pct = languages.length ? Math.round((done / languages.length) * 100) : 0
+  document.getElementById('progressFill').style.width = pct + '%'
+
+  if (allDone) {
+    translateBtn.textContent = 'Translate'
+    const hasSuccess = languages.some(l => l.status === 'done')
+    if (hasSuccess) {
+      const dlBtn = document.getElementById('downloadBtn')
+      dlBtn.style.display = ''
+      dlBtn.disabled = false
+      dlBtn.textContent = hasReview ? '⬇ Download ZIP (with review notes)' : '⬇ Download ZIP'
+      dlBtn.addEventListener('click', downloadZip, { once: true })
+    }
+    document.getElementById('resetLink').style.display = ''
+  }
+}
+
+// ── Download ──────────────────────────────────────────────────────────────────
+async function downloadZip() {
+  const btn = document.getElementById('downloadBtn')
+  btn.disabled = true
+  btn.textContent = 'Preparing ZIP…'
+  try {
+    const res = await fetch(`/api/download/${currentJobId}`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || 'Download failed')
+    }
+    const blob = await res.blob()
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `translations.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+    btn.textContent = '✓ Downloaded'
+  } catch (err) {
+    showError(err.message)
+    btn.disabled = false
+    btn.textContent = '⬇ Download ZIP'
+  }
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+document.getElementById('resetLink').addEventListener('click', () => {
+  clearTimeout(pollTimer)
+  currentJobId = null
+  selectedFile = null
+  fileInput.value = ''
+  uploadText.style.display = 'none'
+  uploadPrompt.style.display = ''
+  translateBtn.disabled = true
+  translateBtn.textContent = 'Translate'
+  document.getElementById('progressSection').classList.remove('visible')
+  document.getElementById('downloadBtn').style.display = 'none'
+  document.getElementById('resetLink').style.display = 'none'
+  document.getElementById('statusList').innerHTML = ''
+  document.getElementById('progressFill').style.width = '0%'
+  hideError()
+})
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function showError(msg) {
+  const box = document.getElementById('errorBox')
+  box.textContent = msg
+  box.classList.add('visible')
+}
+function hideError() {
+  document.getElementById('errorBox').classList.remove('visible')
+}
+</script>
+</body>
+</html>
