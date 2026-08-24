@@ -216,6 +216,12 @@
   <div class="section-label">Target Languages</div>
   <div class="lang-grid" id="langGrid"></div>
 
+  <!-- Translation QA -->
+  <div class="lang-check" id="qaCheck" style="margin-bottom: 24px;">
+    <input type="checkbox" id="qaCheckbox">
+    <span class="lang-name">Run Translation QA</span>
+  </div>
+
   <!-- Translate button -->
   <button class="btn btn-primary" id="translateBtn" disabled>Translate</button>
 
@@ -245,6 +251,7 @@ const LANGUAGES = [
   { locale: 'ja-jp', name: 'Japanese' },
   { locale: 'ko-kr', name: 'Korean' },
   { locale: 'zh-cn', name: 'Chinese (Simplified)' },
+  { locale: 'pt-pt', name: 'Portuguese' },
 ]
 
 let selectedFile = null
@@ -257,8 +264,9 @@ const grid = document.getElementById('langGrid')
 LANGUAGES.forEach(({ locale, name }) => {
   const label = document.createElement('label')
   label.className = 'lang-check'
+  const checked = locale === 'pt-pt' ? '' : 'checked'
   label.innerHTML = `
-    <input type="checkbox" value="${locale}" checked>
+    <input type="checkbox" value="${locale}" ${checked}>
     <span class="lang-name">${name}</span>
     <span class="lang-code">${locale}</span>
   `
@@ -312,6 +320,7 @@ translateBtn.addEventListener('click', async () => {
   const fd = new FormData()
   fd.append('file', selectedFile)
   fd.append('languages', JSON.stringify(locales))
+  fd.append('runQA', document.getElementById('qaCheckbox').checked)
 
   try {
     const res = await fetch('/api/translate', { method: 'POST', body: fd })

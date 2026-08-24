@@ -37,6 +37,7 @@ const LANGUAGES = {
   'ja-jp': { deepl: 'JA',  name: 'Japanese' },
   'ko-kr': { deepl: 'KO',  name: 'Korean' },
   'zh-cn': { deepl: 'ZH', name: 'Chinese (Simplified)' },
+  'pt-pt': { deepl: 'PT-PT', name: 'Portuguese' },
 }
 
 // Free keys end in :fx — paid/developer keys use the main endpoint
@@ -322,8 +323,8 @@ async function processJob(jobId) {
 
   job.fileBuffer = null  // free source buffer
 
-  // Phase 2 — Gemini review (only if API key configured)
-  if (process.env.GEMINI_API_KEY && enText) {
+  // Phase 2 — Gemini review (only if requested and API key configured)
+  if (job.runQA && process.env.GEMINI_API_KEY && enText) {
     for (const lang of job.languages) {
       if (lang.status !== 'translated') continue
       lang.status = 'reviewing'
@@ -371,12 +372,14 @@ app.post('/api/translate', upload.single('file'), (req, res) => {
 
   const jobId = crypto.randomUUID()
   const baseName = decodeURIComponent(req.file.originalname).replace(/\.docx$/i, '').trim()
+  const runQA = req.body.runQA === 'true'
 
   jobs.set(jobId, {
     id: jobId,
     filename: baseName,
     originalFilename: req.file.originalname,
     fileBuffer: req.file.buffer,
+    runQA,
     languages: selected.map(locale => ({
       locale,
       name: LANGUAGES[locale].name,
