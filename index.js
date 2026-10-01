@@ -29,15 +29,17 @@ const upload = multer({
 })
 
 // ── Language config ───────────────────────────────────────────────────────────
+// glossary: true → the multilingual glossary is expected to have an EN->deepl
+// dictionary for this language; a missing one fails the translation loudly.
 const LANGUAGES = {
-  'de-de': { deepl: 'DE',  name: 'German' },
-  'fr-fr': { deepl: 'FR',  name: 'French' },
-  'it-it': { deepl: 'IT',  name: 'Italian' },
-  'es-xn': { deepl: 'ES',  name: 'Spanish' },
-  'ja-jp': { deepl: 'JA',  name: 'Japanese' },
-  'ko-kr': { deepl: 'KO',  name: 'Korean' },
-  'zh-cn': { deepl: 'ZH', name: 'Chinese (Simplified)' },
-  'pt-pt': { deepl: 'PT-PT', name: 'Portuguese' },
+  'de-de': { deepl: 'DE',  name: 'German',               glossary: true },
+  'fr-fr': { deepl: 'FR',  name: 'French',               glossary: true },
+  'it-it': { deepl: 'IT',  name: 'Italian',              glossary: true },
+  'es-xn': { deepl: 'ES',  name: 'Spanish',              glossary: true },
+  'ja-jp': { deepl: 'JA',  name: 'Japanese',             glossary: true },
+  'ko-kr': { deepl: 'KO',  name: 'Korean',               glossary: true },
+  'zh-cn': { deepl: 'ZH',  name: 'Chinese (Simplified)', glossary: true },
+  'pt-pt': { deepl: 'PT-PT', name: 'Portuguese',         glossary: false },
 }
 
 // Free keys end in :fx — paid/developer keys use the main endpoint
@@ -46,7 +48,8 @@ const DEEPL_BASE = process.env.DEEPL_API_KEY?.endsWith(':fx')
   : 'https://api.deepl.com'
 
 // ── Translation config (env-overridable) ──────────────────────────────────────
-const SOURCE_LANG = process.env.SOURCE_LANG || 'EN'
+// Glossaries require an explicit source language and ours are EN-sourced — always EN
+const SOURCE_LANG = 'EN'
 const FORMALITY = process.env.FORMALITY || 'prefer_more'
 const GLOSSARY_ID = process.env.DEEPL_GLOSSARY_ID || null
 
@@ -73,49 +76,42 @@ async function getGlossaryDictionaries() {
   if (!GLOSSARY_ID) return []
   if (!glossaryDictionariesPromise) {
     glossaryDictionariesPromise = (async () => {
-      const apiKey = process.env.DEEPL_API_KEY
-      const headers = { Authorization: `DeepL-Auth-Key ${apiKey}` }
-      try {
-        // Multilingual glossary API (v3) — may have multiple dictionaries
-        const res = await fetch(`${DEEPL_BASE}/v3/glossaries/${GLOSSARY_ID}`, { headers, signal: AbortSignal.timeout(15000) })
-        if (res.ok) {
-          const data = await res.json()
-          const dicts = (data.dictionaries || []).map(d => ({
-            source_lang: (d.source_lang || '').toUpperCase(),
-            target_lang: (d.target_lang || '').toUpperCase(),
-          }))
-          log(`[glossary] loaded ${dicts.length} dictionary pair(s) from ${GLOSSARY_ID}: ${dicts.map(d => `${d.source_lang}->${d.target_lang}`).join(', ') || '(none)'}`)
-          return dicts
-        }
-        // Legacy single-pair glossary API (v2)
-        const legacyRes = await fetch(`${DEEPL_BASE}/v2/glossaries/${GLOSSARY_ID}`, { headers, signal: AbortSignal.timeout(15000) })
-        if (legacyRes.ok) {
-          const data = await legacyRes.json()
-          const dict = { source_lang: (data.source_lang || '').toUpperCase(), target_lang: (data.target_lang || '').toUpperCase() }
-          log(`[glossary] loaded legacy single-pair glossary ${GLOSSARY_ID}: ${dict.source_lang}->${dict.target_lang}`)
-          return [dict]
-        }
-        log(`[glossary] WARNING: could not load glossary ${GLOSSARY_ID} (v3 status ${res.status}, v2 status ${legacyRes.status}) — glossary_id will be omitted for all languages`)
-        return []
-      } catch (err) {
-        log(`[glossary] WARNING: glossary lookup failed: ${err.message} — glossary_id will be omitted for all languages`)
-        return []
+      const headers = { Authorization: `DeepL-Auth-Key ${process.env.DEEPL_API_KEY}` }
+      // Multilingual glossary API (v3)
+      const res = await fetch(`${DEEPL_BASE}/v3/glossaries/${GLOSSARY_ID}`, { headers, signal: AbortSignal.timeout(15000) })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new Error(`Glossary ${GLOSSARY_ID} could not be loaded (${res.status}): ${text}`)
       }
+      const data = await res.json()
+      const dicts = (data.dictionaries || []).map(d => ({
+        source_lang: (d.source_lang || '').toUpperCase(),
+        target_lang: (d.target_lang || '').toUpperCase(),
+      }))
+      log(`[glossary] loaded "${data.name}" ${GLOSSARY_ID}: ${dicts.map(d => `${d.source_lang}->${d.target_lang}`).join(', ') || '(no dictionaries)'}`)
+      return dicts
     })()
+    // Don't cache a failure — the next job retries the lookup
+    glossaryDictionariesPromise.catch(() => { glossaryDictionariesPromise = null })
   }
   return glossaryDictionariesPromise
 }
 
+// Returns the glossary_id to send for this target, or null when no glossary is
+// configured / the language is intentionally uncovered. Throws on any glossary
+// problem rather than silently translating without it.
 async function glossaryIdForTarget(targetLocale, deeplLang) {
   if (!GLOSSARY_ID) return null
+  if (!LANGUAGES[targetLocale]?.glossary) {
+    log(`[glossary] ${targetLocale} (${deeplLang}) is not covered by the glossary — translating without one`)
+    return null
+  }
   const dicts = await getGlossaryDictionaries()
-  if (!dicts.length) return null
   const srcAliases = langAliases(SOURCE_LANG)
   const tgtAliases = langAliases(deeplLang)
   const match = dicts.some(d => srcAliases.includes(d.source_lang) && tgtAliases.includes(d.target_lang))
   if (!match) {
-    log(`[glossary] no dictionary for ${SOURCE_LANG}->${deeplLang} (locale ${targetLocale}) — omitting glossary_id for this language`)
-    return null
+    throw new Error(`Glossary ${GLOSSARY_ID} has no ${SOURCE_LANG}->${deeplLang} dictionary (locale ${targetLocale}) — fix DEEPL_GLOSSARY_ID or the glossary`)
   }
   return GLOSSARY_ID
 }
@@ -229,7 +225,7 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
     const body = await dlRes.text().catch(() => '')
     throw new Error(`Download failed (${dlRes.status}): ${body}`)
   }
-  return Buffer.from(await dlRes.arrayBuffer())
+  return { buffer: Buffer.from(await dlRes.arrayBuffer()), glossaryId }
 }
 
 // ── DOCX text extraction — pulls only <w:t> text nodes to avoid XML artifacts ─
@@ -393,7 +389,9 @@ async function processJob(jobId) {
   for (const lang of job.languages) {
     lang.status = 'translating'
     try {
-      lang.buffer = await translateDocument(job.fileBuffer, job.originalFilename, lang.locale)
+      const result = await translateDocument(job.fileBuffer, job.originalFilename, lang.locale)
+      lang.buffer = result.buffer
+      lang.glossaryId = result.glossaryId
       lang.status = 'translated'  // intermediate — review comes next
     } catch (err) {
       lang.status = 'error'
@@ -403,6 +401,11 @@ async function processJob(jobId) {
   }
 
   job.fileBuffer = null  // free source buffer
+
+  const glossarySummary = job.languages
+    .map(l => `${l.locale}=${l.status === 'error' ? 'FAILED' : (l.glossaryId || 'none')}`)
+    .join(', ')
+  log(`[${jobId}] glossary per language: ${glossarySummary}`)
 
   // Phase 2 — Gemini review (only if requested and API key configured)
   if (job.runQA && process.env.GEMINI_API_KEY && enText) {
@@ -467,6 +470,7 @@ app.post('/api/translate', upload.single('file'), (req, res) => {
       status: 'waiting',
       error: null,
       buffer: null,
+      glossaryId: null,
     })),
     startedAt: Date.now(),
     completedAt: null,
