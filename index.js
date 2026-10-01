@@ -45,6 +45,81 @@ const DEEPL_BASE = process.env.DEEPL_API_KEY?.endsWith(':fx')
   ? 'https://api-free.deepl.com'
   : 'https://api.deepl.com'
 
+// ── Translation config (env-overridable) ──────────────────────────────────────
+const SOURCE_LANG = process.env.SOURCE_LANG || 'EN'
+const FORMALITY = process.env.FORMALITY || 'prefer_more'
+const GLOSSARY_ID = process.env.DEEPL_GLOSSARY_ID || null
+
+// ── Startup checks ────────────────────────────────────────────────────────────
+if (process.env.DEEPL_API_KEY) {
+  const isFreeKey = process.env.DEEPL_API_KEY.endsWith(':fx')
+  log(`[DeepL key] ${isFreeKey ? 'FREE' : 'PRO'} tier key detected (base=${DEEPL_BASE})`)
+  if (isFreeKey) log('[DeepL key] WARNING: Free-tier key in use — 500,000 characters/month limit applies')
+}
+if (!GLOSSARY_ID) {
+  log('[glossary] WARNING: DEEPL_GLOSSARY_ID not set — uploads will proceed without a glossary')
+}
+
+// ── Glossary dictionary lookup — which source/target pairs the glossary covers ─
+// ZH and ZH-HANS are treated as the same language when matching dictionaries,
+// since DeepL glossaries may register Simplified Chinese under either code.
+function langAliases(code) {
+  const c = (code || '').toUpperCase()
+  return (c === 'ZH' || c === 'ZH-HANS') ? ['ZH', 'ZH-HANS'] : [c]
+}
+
+let glossaryDictionariesPromise = null
+async function getGlossaryDictionaries() {
+  if (!GLOSSARY_ID) return []
+  if (!glossaryDictionariesPromise) {
+    glossaryDictionariesPromise = (async () => {
+      const apiKey = process.env.DEEPL_API_KEY
+      const headers = { Authorization: `DeepL-Auth-Key ${apiKey}` }
+      try {
+        // Multilingual glossary API (v3) — may have multiple dictionaries
+        const res = await fetch(`${DEEPL_BASE}/v3/glossaries/${GLOSSARY_ID}`, { headers, signal: AbortSignal.timeout(15000) })
+        if (res.ok) {
+          const data = await res.json()
+          const dicts = (data.dictionaries || []).map(d => ({
+            source_lang: (d.source_lang || '').toUpperCase(),
+            target_lang: (d.target_lang || '').toUpperCase(),
+          }))
+          log(`[glossary] loaded ${dicts.length} dictionary pair(s) from ${GLOSSARY_ID}: ${dicts.map(d => `${d.source_lang}->${d.target_lang}`).join(', ') || '(none)'}`)
+          return dicts
+        }
+        // Legacy single-pair glossary API (v2)
+        const legacyRes = await fetch(`${DEEPL_BASE}/v2/glossaries/${GLOSSARY_ID}`, { headers, signal: AbortSignal.timeout(15000) })
+        if (legacyRes.ok) {
+          const data = await legacyRes.json()
+          const dict = { source_lang: (data.source_lang || '').toUpperCase(), target_lang: (data.target_lang || '').toUpperCase() }
+          log(`[glossary] loaded legacy single-pair glossary ${GLOSSARY_ID}: ${dict.source_lang}->${dict.target_lang}`)
+          return [dict]
+        }
+        log(`[glossary] WARNING: could not load glossary ${GLOSSARY_ID} (v3 status ${res.status}, v2 status ${legacyRes.status}) — glossary_id will be omitted for all languages`)
+        return []
+      } catch (err) {
+        log(`[glossary] WARNING: glossary lookup failed: ${err.message} — glossary_id will be omitted for all languages`)
+        return []
+      }
+    })()
+  }
+  return glossaryDictionariesPromise
+}
+
+async function glossaryIdForTarget(targetLocale, deeplLang) {
+  if (!GLOSSARY_ID) return null
+  const dicts = await getGlossaryDictionaries()
+  if (!dicts.length) return null
+  const srcAliases = langAliases(SOURCE_LANG)
+  const tgtAliases = langAliases(deeplLang)
+  const match = dicts.some(d => srcAliases.includes(d.source_lang) && tgtAliases.includes(d.target_lang))
+  if (!match) {
+    log(`[glossary] no dictionary for ${SOURCE_LANG}->${deeplLang} (locale ${targetLocale}) — omitting glossary_id for this language`)
+    return null
+  }
+  return GLOSSARY_ID
+}
+
 // ── In-memory job store ───────────────────────────────────────────────────────
 // jobId → { filename, fileBuffer, languages: [{locale, name, status, error, buffer}] }
 const jobs = new Map()
@@ -81,6 +156,8 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
   const tag = `[DeepL:${targetLocale}]`
 
   // Step 1 — upload
+  const glossaryId = await glossaryIdForTarget(targetLocale, deeplLang)
+
   const { document_id, document_key } = await withRetry(async () => {
     const fd = new FormData()
     fd.append(
@@ -88,9 +165,13 @@ async function translateDocument(fileBuffer, originalFilename, targetLocale) {
       new Blob([fileBuffer], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
       originalFilename,
     )
+    fd.append('source_lang', SOURCE_LANG)
     fd.append('target_lang', deeplLang)
+    fd.append('formality', FORMALITY)
+    if (glossaryId) fd.append('glossary_id', glossaryId)
 
-    log(`${tag} uploading to ${DEEPL_BASE} target_lang=${deeplLang}`)
+    const params = { source_lang: SOURCE_LANG, target_lang: deeplLang, formality: FORMALITY, glossary_id: glossaryId || '(none)' }
+    log(`${tag} uploading to ${DEEPL_BASE} params=${JSON.stringify(params)}`)
     const res = await fetch(`${DEEPL_BASE}/v2/document`, {
       method: 'POST',
       headers: { Authorization: `DeepL-Auth-Key ${apiKey}` },
